@@ -98,6 +98,13 @@ impl Market {
     }
 }
 
+enum Lag {
+    Waiting,
+    Behind(Instant),
+    CaughtUp,
+    Stale,
+}
+
 #[derive(Default)]
 struct Stats {
     updates: u64,
@@ -266,32 +273,47 @@ impl Engine {
         for (ticker, market) in &mut self.markets {
             let mut source_lost = false;
             for i in 0..market.replicas.len() {
-                let newest_other = market
-                    .replicas
-                    .iter()
-                    .enumerate()
-                    .filter(|&(j, r)| j != i && r.live)
-                    .map(|(_, r)| r.last_change)
-                    .max();
-                let replica = &mut market.replicas[i];
-                if !replica.live {
+                if !market.replicas[i].live {
                     continue;
                 }
-                match replica.lagging {
-                    Some((_, target)) if replica.last_change >= target => replica.lagging = None,
+                let others = || market.replicas.iter().enumerate().filter(move |&(j, r)| j != i && r.live);
+                let newest_other = others().map(|(_, r)| r.last_change).max();
+                let replica = &market.replicas[i];
+                let lag = match replica.lagging {
+                    Some((_, target)) if replica.last_change >= target => Lag::CaughtUp,
                     Some((since, _)) if now.duration_since(since) > self.stale_after => {
+                        // A copy that subscribed slightly later gets some
+                        // changes inside its snapshot rather than as deltas,
+                        // so it never "sees" them. If the books agree,
+                        // nothing is actually missing.
+                        if others().any(|(_, r)| r.book == replica.book) {
+                            Lag::CaughtUp
+                        } else {
+                            Lag::Stale
+                        }
+                    }
+                    Some(_) => Lag::Waiting,
+                    None => match newest_other.filter(|&t| t > replica.last_change) {
+                        Some(other) => Lag::Behind(other),
+                        None => Lag::Waiting,
+                    },
+                };
+
+                let replica = &mut market.replicas[i];
+                match lag {
+                    Lag::Waiting => {}
+                    Lag::Behind(other) => replica.lagging = Some((now, other)),
+                    Lag::CaughtUp => {
+                        replica.lagging = None;
+                        replica.last_change = replica.last_change.max(newest_other.unwrap_or(now));
+                    }
+                    Lag::Stale => {
                         let conn = ConnId { shard: market.shard, replica: i };
-                        warn!(%conn, %ticker, "replica stopped receiving updates, resubscribing");
+                        warn!(%conn, %ticker, "replica's book diverged, resubscribing");
                         replica.live = false;
                         replica.lagging = None;
                         request_resubscribe(&self.sockets, &mut self.stats, conn, ticker);
                         source_lost |= market.source == Some(i);
-                    }
-                    Some(_) => {}
-                    None => {
-                        if let Some(other) = newest_other.filter(|&t| t > replica.last_change) {
-                            replica.lagging = Some((now, other));
-                        }
                     }
                 }
             }

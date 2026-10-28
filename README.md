@@ -88,10 +88,12 @@ practice, so this collector doesn't depend on it.
   market on that socket. The socket reconnects, and the other replica keeps
   writing in the meantime.
 - **Quiet subscriptions.** If one replica sees a change for a market and the
-  other doesn't catch up within `--stale-secs`, the lagging one is
-  resubscribed for that market, and the engine fails over first if it was the
-  source. Comparing the two replicas avoids guessing per-market activity
-  thresholds: a quiet market is quiet on both sockets.
+  other doesn't catch up within `--stale-secs`, their books are compared. A
+  copy that subscribed a moment later gets some changes inside its snapshot
+  rather than as deltas, so matching books mean nothing is missing. If they
+  differ, the lagging copy is resubscribed for that market, with a failover
+  first if it was the source. Comparing replicas avoids guessing per-market
+  activity thresholds: a quiet market is quiet on both sockets.
 - **Inconsistent books.** A delta that would take a level below zero means
   that copy has drifted, so it's treated the same way.
 - **Dead sockets.** Kalshi pings every 10s, so 30s of silence means the

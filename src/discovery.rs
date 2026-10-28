@@ -49,15 +49,23 @@ pub async fn run(cfg: DiscoveryConfig, events: mpsc::UnboundedSender<FeedEvent>,
     let mut home: HashMap<String, usize> = HashMap::new();
     let mut sockets = JoinSet::new();
     let mut tick = tokio::time::interval(cfg.interval);
+    // A full scan can take longer than the interval; don't fire back to back.
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut stop = shutdown.clone();
     let mut warned_full = false;
 
     loop {
         tokio::select! {
-            _ = tick.tick() => {}
+            biased;
             _ = stop.changed() => break,
+            _ = tick.tick() => {}
         }
-        let mut open = match rest::open_markets(&http, crate::kalshi::REST_URL).await {
+        let scan = tokio::select! {
+            biased;
+            _ = stop.changed() => break,
+            scan = rest::open_markets(&http, crate::kalshi::REST_URL) => scan,
+        };
+        let mut open = match scan {
             Ok(open) => open,
             Err(e) => {
                 warn!("market discovery failed: {e:#}");
