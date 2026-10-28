@@ -2,7 +2,36 @@
 //! messages written by the
 //! [`AlignedSbeWriter`](crate::util::aligned_sbe_writer::AlignedSbeWriter)
 
-use std::{fs::File, marker::PhantomData, os::unix::fs::FileExt, path::Path};
+use std::{fs::File, marker::PhantomData, path::Path};
+
+#[cfg(unix)]
+use std::os::unix::fs::FileExt;
+
+/// Windows has no `read_exact_at`, only `seek_read`, which may return short
+/// reads. This shim gives the reader the same API on both platforms.
+#[cfg(windows)]
+trait FileExt {
+    fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> std::io::Result<()>;
+}
+
+#[cfg(windows)]
+impl FileExt for File {
+    fn read_exact_at(&self, mut buf: &mut [u8], mut offset: u64) -> std::io::Result<()> {
+        use std::os::windows::fs::FileExt as _;
+        while !buf.is_empty() {
+            match self.seek_read(buf, offset) {
+                Ok(0) => return Err(std::io::ErrorKind::UnexpectedEof.into()),
+                Ok(n) => {
+                    buf = &mut buf[n..];
+                    offset += n as u64;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(())
+    }
+}
 
 use anyhow::Context;
 use crossbeam::channel::{Receiver, Sender, bounded};
