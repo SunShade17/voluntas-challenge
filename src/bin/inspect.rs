@@ -21,6 +21,8 @@ fn main() -> anyhow::Result<()> {
     let mut reader = AlignedSbeReader::<OrderbookSchema>::open(&path)?;
 
     let mut books: HashMap<String, Book> = HashMap::new();
+    // Snapshots per second they were written, to make the minute batches visible.
+    let mut snapshot_seconds: BTreeMap<i64, u64> = BTreeMap::new();
     let (mut snapshots, mut updates, mut orphan_updates, mut crossed) = (0u64, 0u64, 0u64, 0u64);
     let (mut first, mut last) = (None, None);
 
@@ -29,6 +31,7 @@ fn main() -> anyhow::Result<()> {
             AnyMessage::Snapshot(decoder) => {
                 let snap = SnapshotDomain::try_from_decoder(decoder)?;
                 snapshots += 1;
+                *snapshot_seconds.entry(snap.received_at.timestamp()).or_default() += 1;
                 first.get_or_insert(snap.received_at);
                 last = Some(snap.received_at);
                 let book = books.entry(snap.symbol).or_default();
@@ -73,7 +76,13 @@ fn main() -> anyhow::Result<()> {
     println!("symbols:         {}", books.len());
     println!("update before snapshot: {orphan_updates}");
     println!("crossed books at end:   {crossed}");
+    println!("snapshot batches (10+ in one second):");
+    for (&second, &count) in snapshot_seconds.iter().filter(|&(_, &count)| count >= 10) {
+        let time = chrono::DateTime::from_timestamp(second, 0).unwrap_or_default();
+        println!("  {} {count}", time.format("%H:%M:%S"));
+    }
 
+    println!("deepest books at end:");
     let mut busiest: Vec<_> = books.iter().collect();
     busiest.sort_by_key(|(_, b)| std::cmp::Reverse(b.bids.len() + b.asks.len()));
     for (symbol, book) in busiest.into_iter().take(3) {
